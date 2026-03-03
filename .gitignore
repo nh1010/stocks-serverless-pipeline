@@ -1,0 +1,28 @@
+# Environment & secrets
+.env
+.env.*
+
+# AWS CDK
+cdk.out/
+cdk.context.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Lambda build artifacts
+*.zip
+layer/python/
+
+# Node / Frontend
+node_modules/
+dist/
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
