@@ -70,3 +70,5 @@ class Frontend(Construct):
             "SiteUrl",
             value=f"https://{self.distribution.distribution_domain_name}",
         )
+        CfnOutput(scope, "SiteBucketName", value=self.bucket.bucket_name)
+        CfnOutput(scope, "DistributionId", value=self.distribution.distribution_id)

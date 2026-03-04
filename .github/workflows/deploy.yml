@@ -1,4 +1,4 @@
-name: Deploy Stocks Pipeline
+name: Update Code
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
+  STACK_NAME: StocksPipeline
 
 permissions:
   contents: read
@@ -15,8 +16,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Deploy to AWS
+  update:
+    name: Update Lambdas + Frontend
     runs-on: ubuntu-latest
 
     steps:
@@ -30,23 +31,61 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: infra/requirements.txt
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Install CDK CLI
-        run: npm install -g aws-cdk
+      - name: Get stack outputs
+        id: outputs
+        run: |
+          OUTPUTS=$(aws cloudformation describe-stacks \
+            --stack-name $STACK_NAME \
+            --query "Stacks[0].Outputs" \
+            --output json)
 
-      - name: Create .env
-        run: echo "MASSIVE_API_KEY=${{ secrets.MASSIVE_API_KEY }}" > .env
+          get_output() { echo "$OUTPUTS" | jq -r ".[] | select(.OutputKey==\"$1\") | .OutputValue"; }
 
-      - name: Deploy
-        run: chmod +x infra/deploy.sh && infra/deploy.sh
+          echo "ingestion_fn=$(get_output IngestionFunctionName)" >> "$GITHUB_OUTPUT"
+          echo "api_fn=$(get_output ApiFunctionName)" >> "$GITHUB_OUTPUT"
+          echo "bucket=$(get_output SiteBucketName)" >> "$GITHUB_OUTPUT"
+          echo "distribution_id=$(get_output DistributionId)" >> "$GITHUB_OUTPUT"
+          echo "api_url=$(get_output ApiUrl)" >> "$GITHUB_OUTPUT"
+
+      - name: Update ingestion Lambda
+        run: |
+          cd backend/lambdas/ingestion
+          zip -r /tmp/ingestion.zip handler.py
+          aws lambda update-function-code \
+            --function-name ${{ steps.outputs.outputs.ingestion_fn }} \
+            --zip-file fileb:///tmp/ingestion.zip
+
+      - name: Update API Lambda
+        run: |
+          cd backend/lambdas/api
+          zip -r /tmp/api.zip handler.py
+          aws lambda update-function-code \
+            --function-name ${{ steps.outputs.outputs.api_fn }} \
+            --zip-file fileb:///tmp/api.zip
+
+      - name: Build frontend
+        if: hashFiles('frontend/package.json') != ''
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Sync frontend to S3
+        if: hashFiles('frontend/package.json') != ''
+        run: |
+          aws s3 sync frontend/dist/ s3://${{ steps.outputs.outputs.bucket }}/ --delete
+          aws s3 cp - s3://${{ steps.outputs.outputs.bucket }}/config.json \
+            --content-type application/json \
+            <<< '{"apiUrl":"${{ steps.outputs.outputs.api_url }}"}'
+
+      - name: Invalidate CloudFront cache
+        if: hashFiles('frontend/package.json') != ''
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ steps.outputs.outputs.distribution_id }} \
+            --paths "/*"

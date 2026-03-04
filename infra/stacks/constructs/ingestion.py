@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from aws_cdk import (
+    CfnOutput,
     Duration,
     aws_events as events,
     aws_events_targets as targets,
@@ -48,3 +49,5 @@ class Ingestion(Construct):
             ),
         )
         rule.add_target(targets.LambdaFunction(self.handler))
+
+        CfnOutput(scope, "IngestionFunctionName", value=self.handler.function_name)

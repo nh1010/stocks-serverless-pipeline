@@ -43,3 +43,4 @@ class Api(Construct):
         self.api_url = self.rest_api.url
 
         CfnOutput(scope, "ApiUrl", value=self.api_url)
+        CfnOutput(scope, "ApiFunctionName", value=self.handler.function_name)
