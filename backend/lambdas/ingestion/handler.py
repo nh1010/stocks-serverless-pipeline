@@ -134,7 +134,12 @@ def handler(event, context):
     logger.info("Event: %s", json.dumps(event))
 
     table_name = os.environ["TABLE_NAME"]
-    trading_date = get_trading_date()
+
+    if event.get("date"):
+        trading_date = date.fromisoformat(event["date"])
+    else:
+        trading_date = get_trading_date()
+
     logger.info("Trading date: %s", trading_date.isoformat())
 
     api_key = get_api_key()

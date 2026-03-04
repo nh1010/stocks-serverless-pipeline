@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Mover } from "../types";
 
 async function getApiUrl(): Promise<string> {
@@ -13,26 +13,23 @@ export function useMovers() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function load() {
-      try {
-        const base = await getApiUrl();
-        const res = await fetch(`${base}movers`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data: Mover[] = await res.json();
-        if (!cancelled) setMovers(data);
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const base = await getApiUrl();
+      const res = await fetch(`${base}movers`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: Mover[] = await res.json();
+      setMovers(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load");
+    } finally {
+      setLoading(false);
     }
-
-    load();
-    return () => { cancelled = true; };
   }, []);
 
-  return { movers, loading, error };
+  useEffect(() => { load(); }, [load]);
+
+  return { movers, loading, error, retry: load };
 }

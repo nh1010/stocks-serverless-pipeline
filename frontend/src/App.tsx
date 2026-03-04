@@ -1,20 +1,27 @@
 import { useMovers } from "./hooks/useMovers";
 import { MoverTable } from "./components/MoverTable";
+import { TopMoverChart } from "./components/TopMoverChart";
+import { LoadingSkeleton } from "./components/LoadingSkeleton";
+import { ErrorState } from "./components/ErrorState";
 
 export default function App() {
-  const { movers, loading, error } = useMovers();
+  const { movers, loading, error, retry } = useMovers();
 
   return (
     <div className="app">
       <header>
         <h1>Stock Movers</h1>
-        <p>Daily top mover from the TRE watchlist</p>
       </header>
 
       <main>
-        {loading && <p className="status">Loading...</p>}
-        {error && <p className="status error">Error: {error}</p>}
-        {!loading && !error && <MoverTable movers={movers} />}
+        {loading && <LoadingSkeleton />}
+        {error && <ErrorState message={error} onRetry={retry} />}
+        {!loading && !error && (
+          <>
+            <TopMoverChart movers={movers} />
+            <MoverTable movers={movers} />
+          </>
+        )}
       </main>
 
       <footer>
