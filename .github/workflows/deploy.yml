@@ -91,3 +91,19 @@ jobs:
           aws cloudfront create-invalidation \
             --distribution-id ${{ steps.outputs.outputs.distribution_id }} \
             --paths "/*"
+
+      - name: Smoke test – API health
+        run: |
+          echo "Testing API endpoint..."
+          STATUS=$(curl -s -o /tmp/smoke-body.txt -w "%{http_code}" \
+            "${{ steps.outputs.outputs.api_url }}movers")
+
+          echo "HTTP $STATUS"
+          cat /tmp/smoke-body.txt | head -c 200
+          echo ""
+
+          if [ "$STATUS" -ne 200 ]; then
+            echo "::error::Smoke test failed — API returned HTTP $STATUS"
+            exit 1
+          fi
+          echo "Smoke test passed"

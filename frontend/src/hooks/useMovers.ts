@@ -19,6 +19,10 @@ export function useMovers() {
     try {
       const base = await getApiUrl();
       const res = await fetch(`${base}movers`);
+      if (res.status === 204) {
+        setMovers([]);
+        return;
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: Mover[] = await res.json();
       setMovers(data);
