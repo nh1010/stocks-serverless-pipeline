@@ -5,6 +5,7 @@
 # AWS CDK
 cdk.out/
 cdk.context.json
+cdk-outputs.json
 
 # Python
 __pycache__/
