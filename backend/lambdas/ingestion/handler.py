@@ -1,114 +1,165 @@
-"""Ingestion Lambda — triggered daily by EventBridge.
+"""
+Ingestion Lambda — runs daily via EventBridge.
 
-Fetches the Massive Grouped Daily endpoint, filters to the watchlist,
-calculates percentage change for each ticker, and writes the top mover
-to DynamoDB.
+Fetches the Massive Grouped Daily endpoint, finds the top mover
+from the watchlist, and writes the result to DynamoDB.
 """
 
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+import time
+from datetime import date, timedelta
 from decimal import Decimal
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import boto3
-import requests
-from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 WATCHLIST = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA"]
-TABLE_NAME = os.environ["TABLE_NAME"]
-SSM_PARAM_NAME = os.environ["SSM_PARAM_NAME"]
 MASSIVE_BASE_URL = "https://api.massive.com"
-
-dynamodb = boto3.resource("dynamodb")
-table = dynamodb.Table(TABLE_NAME)
-ssm = boto3.client("ssm")
-
-_api_key: str | None = None
+MAX_RETRIES = 3
+RETRY_BACKOFF = 2  # seconds
 
 
-def _get_api_key() -> str:
-    global _api_key
-    if _api_key is None:
-        resp = ssm.get_parameter(Name=SSM_PARAM_NAME, WithDecryption=True)
-        _api_key = resp["Parameter"]["Value"]
-    return _api_key
+def get_api_key() -> str:
+    ssm = boto3.client("ssm")
+    param = ssm.get_parameter(
+        Name=os.environ["SSM_API_KEY_NAME"], WithDecryption=True
+    )
+    return param["Parameter"]["Value"]
 
 
-def _fetch_grouped_daily(date_str: str) -> list[dict]:
-    """Fetch all US stock data for a given date from Massive grouped daily endpoint."""
-    url = f"{MASSIVE_BASE_URL}/v2/aggs/grouped/locale/us/market/stocks/{date_str}"
-    params = {"adjusted": "true", "apiKey": _get_api_key()}
+def get_trading_date() -> date:
+    """Return the most recent weekday (today if weekday, else Friday)."""
+    d = date.today()
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
 
-    for attempt in range(3):
+
+def fetch_grouped_daily(api_key: str, trading_date: date) -> list[dict]:
+    """
+    Call the Massive Grouped Daily endpoint with retry logic for
+    rate limits (429) and transient server errors (5xx).
+    """
+    url = (
+        f"{MASSIVE_BASE_URL}/v2/aggs/grouped/locale/us/market/stocks/"
+        f"{trading_date.isoformat()}?adjusted=true&apiKey={api_key}"
+    )
+    safe_url = url.replace(api_key, "***")
+
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.get(url, params=params, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
+            logger.info("Attempt %d: GET %s", attempt, safe_url)
+            req = Request(url)
+            resp = urlopen(req, timeout=15)
+            data = json.loads(resp.read())
+            results = data.get("results", [])
+            logger.info("Received %d tickers", len(results))
+            return results
+        except HTTPError as exc:
+            body = exc.read().decode() if exc.fp else ""
+            logger.warning("HTTP %d on attempt %d: %s", exc.code, attempt, body)
 
-            if data.get("resultsCount", 0) == 0:
-                logger.warning("No results for %s (market holiday?)", date_str)
-                return []
-
-            return data.get("results", [])
-
-        except requests.exceptions.RequestException as exc:
-            logger.error("Attempt %d failed: %s", attempt + 1, exc)
-            if attempt == 2:
-                raise
+            if exc.code == 429 and attempt < MAX_RETRIES:
+                wait = RETRY_BACKOFF * attempt
+                logger.info("Rate limited — retrying in %ds", wait)
+                time.sleep(wait)
+                continue
+            if 500 <= exc.code < 600 and attempt < MAX_RETRIES:
+                wait = RETRY_BACKOFF * attempt
+                logger.info("Server error — retrying in %ds", wait)
+                time.sleep(wait)
+                continue
+            raise
 
     return []
 
 
-def _find_top_mover(results: list[dict]) -> dict | None:
-    """Filter to watchlist and return the stock with the highest absolute % change."""
-    watchlist_data = [r for r in results if r.get("T") in WATCHLIST]
-
-    if not watchlist_data:
-        logger.warning("No watchlist tickers found in results")
+def calculate_top_mover(results: list[dict]) -> dict | None:
+    watchlist_stocks = [r for r in results if r.get("T") in WATCHLIST]
+    if not watchlist_stocks:
+        logger.warning("No watchlist tickers found in API response")
         return None
 
-    top = max(watchlist_data, key=lambda r: abs((r["c"] - r["o"]) / r["o"]))
-    pct_change = ((top["c"] - top["o"]) / top["o"]) * 100
+    movers = []
+    for stock in watchlist_stocks:
+        ticker = stock["T"]
+        open_price = stock["o"]
+        close_price = stock["c"]
+        if open_price == 0:
+            logger.warning("Skipping %s — open price is 0", ticker)
+            continue
+        pct_change = ((close_price - open_price) / open_price) * 100
+        movers.append({
+            "ticker": ticker,
+            "open_price": open_price,
+            "close_price": close_price,
+            "percent_change": pct_change,
+        })
+        logger.info("%s  open=%.2f  close=%.2f  change=%+.2f%%",
+                     ticker, open_price, close_price, pct_change)
 
-    return {
-        "ticker": top["T"],
-        "percent_change": round(pct_change, 4),
-        "close_price": top["c"],
+    if not movers:
+        return None
+
+    return max(movers, key=lambda m: abs(m["percent_change"]))
+
+
+def write_to_dynamo(table_name: str, trading_date: date, mover: dict) -> None:
+    dynamo = boto3.resource("dynamodb")
+    table = dynamo.Table(table_name)
+    item = {
+        "date": trading_date.isoformat(),
+        "ticker": mover["ticker"],
+        "percent_change": Decimal(str(round(mover["percent_change"], 4))),
+        "close_price": Decimal(str(round(mover["close_price"], 2))),
     }
+    table.put_item(Item=item)
+    logger.info("Wrote to DynamoDB: %s", json.dumps(item, default=str))
 
 
 def handler(event, context):
-    logger.info("Ingestion triggered: %s", json.dumps(event))
+    logger.info("Event: %s", json.dumps(event))
 
-    target_date = (datetime.utcnow() - timedelta(hours=5)).strftime("%Y-%m-%d")
-    logger.info("Fetching data for %s", target_date)
+    table_name = os.environ["TABLE_NAME"]
+    trading_date = get_trading_date()
+    logger.info("Trading date: %s", trading_date.isoformat())
 
-    results = _fetch_grouped_daily(target_date)
-    if not results:
-        logger.info("No data for %s — skipping", target_date)
-        return {"statusCode": 200, "body": "No data (likely market holiday)"}
-
-    top_mover = _find_top_mover(results)
-    if not top_mover:
-        logger.info("No watchlist matches for %s — skipping", target_date)
-        return {"statusCode": 200, "body": "No watchlist matches"}
-
-    item = {
-        "date": target_date,
-        "ticker": top_mover["ticker"],
-        "percent_change": Decimal(str(top_mover["percent_change"])),
-        "close_price": Decimal(str(top_mover["close_price"])),
-    }
+    api_key = get_api_key()
 
     try:
-        table.put_item(Item=item)
-        logger.info("Stored top mover: %s", item)
-    except ClientError as exc:
-        logger.error("DynamoDB write failed: %s", exc)
-        raise
+        results = fetch_grouped_daily(api_key, trading_date)
+    except HTTPError as exc:
+        if exc.code == 403 and trading_date == date.today():
+            prev = trading_date - timedelta(days=1)
+            while prev.weekday() >= 5:
+                prev -= timedelta(days=1)
+            logger.info("Today's data not ready — falling back to %s", prev)
+            results = fetch_grouped_daily(api_key, prev)
+            trading_date = prev
+        else:
+            logger.error("Massive API failed: HTTP %d", exc.code)
+            raise
 
-    return {"statusCode": 200, "body": json.dumps({"date": target_date, **top_mover})}
+    top_mover = calculate_top_mover(results)
+    if top_mover is None:
+        msg = f"No mover data available for {trading_date.isoformat()}"
+        logger.error(msg)
+        return {"statusCode": 200, "body": json.dumps({"message": msg})}
+
+    write_to_dynamo(table_name, trading_date, top_mover)
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "date": trading_date.isoformat(),
+            "top_mover": top_mover["ticker"],
+            "percent_change": round(top_mover["percent_change"], 4),
+            "close_price": round(top_mover["close_price"], 2),
+        }),
+    }
