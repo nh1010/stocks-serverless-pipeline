@@ -32,6 +32,25 @@ header p {
   font-size: 0.9rem;
 }
 
+.days {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.day-card {
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+}
+
+.day-card h2 {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #8b949e;
+  margin-bottom: 0.75rem;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -39,22 +58,38 @@ table {
 
 th {
   text-align: left;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #8b949e;
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid #21262d;
+  color: #484f58;
+  padding: 0.25rem 0.5rem;
 }
 
 td {
-  padding: 0.75rem;
-  border-bottom: 1px solid #21262d;
-  font-size: 0.95rem;
+  padding: 0.5rem;
+  font-size: 0.9rem;
+  border-top: 1px solid #161b22;
+}
+
+tr.top-mover td {
+  background: rgba(56, 139, 253, 0.06);
 }
 
 .ticker {
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  background: #388bfd33;
+  color: #58a6ff;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  letter-spacing: 0.04em;
 }
 
 .gain {

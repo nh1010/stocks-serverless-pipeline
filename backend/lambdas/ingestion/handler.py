@@ -80,11 +80,11 @@ def fetch_grouped_daily(api_key: str, trading_date: date) -> list[dict]:
     return []
 
 
-def calculate_top_mover(results: list[dict]) -> dict | None:
+def calculate_movers(results: list[dict]) -> list[dict]:
     watchlist_stocks = [r for r in results if r.get("T") in WATCHLIST]
     if not watchlist_stocks:
         logger.warning("No watchlist tickers found in API response")
-        return None
+        return []
 
     movers = []
     for stock in watchlist_stocks:
@@ -104,20 +104,27 @@ def calculate_top_mover(results: list[dict]) -> dict | None:
         logger.info("%s  open=%.2f  close=%.2f  change=%+.2f%%",
                      ticker, open_price, close_price, pct_change)
 
-    if not movers:
-        return None
-
-    return max(movers, key=lambda m: abs(m["percent_change"]))
+    movers.sort(key=lambda m: abs(m["percent_change"]), reverse=True)
+    return movers
 
 
-def write_to_dynamo(table_name: str, trading_date: date, mover: dict) -> None:
+def write_to_dynamo(table_name: str, trading_date: date, movers: list[dict]) -> None:
     dynamo = boto3.resource("dynamodb")
     table = dynamo.Table(table_name)
+    top = movers[0]
     item = {
         "date": trading_date.isoformat(),
-        "ticker": mover["ticker"],
-        "percent_change": Decimal(str(round(mover["percent_change"], 4))),
-        "close_price": Decimal(str(round(mover["close_price"], 2))),
+        "ticker": top["ticker"],
+        "percent_change": Decimal(str(round(top["percent_change"], 4))),
+        "close_price": Decimal(str(round(top["close_price"], 2))),
+        "all_stocks": [
+            {
+                "ticker": m["ticker"],
+                "percent_change": Decimal(str(round(m["percent_change"], 4))),
+                "close_price": Decimal(str(round(m["close_price"], 2))),
+            }
+            for m in movers
+        ],
     }
     table.put_item(Item=item)
     logger.info("Wrote to DynamoDB: %s", json.dumps(item, default=str))
@@ -146,20 +153,21 @@ def handler(event, context):
             logger.error("Massive API failed: HTTP %d", exc.code)
             raise
 
-    top_mover = calculate_top_mover(results)
-    if top_mover is None:
+    movers = calculate_movers(results)
+    if not movers:
         msg = f"No mover data available for {trading_date.isoformat()}"
         logger.error(msg)
         return {"statusCode": 200, "body": json.dumps({"message": msg})}
 
-    write_to_dynamo(table_name, trading_date, top_mover)
+    write_to_dynamo(table_name, trading_date, movers)
 
+    top = movers[0]
     return {
         "statusCode": 200,
         "body": json.dumps({
             "date": trading_date.isoformat(),
-            "top_mover": top_mover["ticker"],
-            "percent_change": round(top_mover["percent_change"], 4),
-            "close_price": round(top_mover["close_price"], 2),
+            "top_mover": top["ticker"],
+            "percent_change": round(top["percent_change"], 4),
+            "close_price": round(top["close_price"], 2),
         }),
     }

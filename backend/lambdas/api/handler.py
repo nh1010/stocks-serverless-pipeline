@@ -46,15 +46,23 @@ def handler(event, context):
     items.sort(key=lambda x: x["date"], reverse=True)
     latest = items[:7]
 
-    movers = [
-        {
+    movers = []
+    for item in latest:
+        entry = {
             "date": item["date"],
             "ticker": item["ticker"],
             "percent_change": float(item["percent_change"]),
             "close_price": float(item["close_price"]),
+            "all_stocks": [
+                {
+                    "ticker": s["ticker"],
+                    "percent_change": float(s["percent_change"]),
+                    "close_price": float(s["close_price"]),
+                }
+                for s in item.get("all_stocks", [])
+            ],
         }
-        for item in latest
-    ]
+        movers.append(entry)
 
     logger.info("Returning %d movers", len(movers))
     return build_response(200, movers)
