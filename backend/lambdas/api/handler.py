@@ -8,10 +8,8 @@ sorted by date descending.
 import json
 import logging
 import os
-from decimal import Decimal
 
 import boto3
-from boto3.dynamodb.conditions import Key
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
