@@ -5,6 +5,7 @@ from aws_cdk import (
     Duration,
     aws_events as events,
     aws_events_targets as targets,
+    aws_iam as iam,
     aws_lambda as _lambda,
     aws_ssm as ssm,
 )
@@ -22,6 +23,13 @@ class Ingestion(Construct):
             self, "MassiveApiKey", parameter_name=SSM_PARAM_NAME
         )
 
+        # Role used by EventBridge Scheduler to invoke the Lambda on retries
+        scheduler_role = iam.Role(
+            self,
+            "SchedulerRole",
+            assumed_by=iam.ServicePrincipal("scheduler.amazonaws.com"),
+        )
+
         self.handler = _lambda.Function(
             self,
             "Handler",
@@ -33,6 +41,7 @@ class Ingestion(Construct):
             environment={
                 "TABLE_NAME": table.table_name,
                 "SSM_API_KEY_NAME": SSM_PARAM_NAME,
+                "SCHEDULER_ROLE_ARN": scheduler_role.role_arn,
             },
             timeout=Duration.seconds(30),
             memory_size=256,
@@ -41,11 +50,28 @@ class Ingestion(Construct):
         table.grant_write_data(self.handler)
         api_key_param.grant_read(self.handler)
 
+        # Let the scheduler role invoke the Lambda
+        self.handler.grant_invoke(scheduler_role)
+
+        # Let the Lambda create/delete one-time retry schedules
+        self.handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["scheduler:CreateSchedule", "scheduler:DeleteSchedule"],
+                resources=["arn:aws:scheduler:*:*:schedule/default/ingestion-retry-*"],
+            )
+        )
+        self.handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[scheduler_role.role_arn],
+            )
+        )
+
         rule = events.Rule(
             self,
             "DailyTrigger",
             schedule=events.Schedule.cron(
-                minute="30", hour="21", week_day="MON-FRI"
+                minute="0", hour="11", week_day="MON-FRI"
             ),
         )
         rule.add_target(targets.LambdaFunction(self.handler))

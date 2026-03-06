@@ -3,13 +3,17 @@ Ingestion Lambda — runs daily via EventBridge.
 
 Fetches the Massive Grouped Daily endpoint, finds the top mover
 from the watchlist, and writes the result to DynamoDB.
+
+Free-tier constraint: data is available one calendar day after close.
+On 403, the handler schedules a retry via EventBridge Scheduler (max 8 attempts,
+30 min apart).
 """
 
 import json
 import logging
 import os
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -23,6 +27,8 @@ WATCHLIST = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA"]
 MASSIVE_BASE_URL = "https://api.massive.com"
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2  # seconds
+MAX_SCHEDULED_RETRIES = 8
+RETRY_DELAY_MINUTES = 30
 
 
 def get_api_key() -> str:
@@ -34,8 +40,8 @@ def get_api_key() -> str:
 
 
 def get_trading_date() -> date:
-    """Return the most recent weekday (today if weekday, else Friday)."""
-    d = date.today()
+    """Return the previous trading day (free tier is always one day behind)."""
+    d = date.today() - timedelta(days=1)
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d
@@ -130,33 +136,67 @@ def write_to_dynamo(table_name: str, trading_date: date, movers: list[dict]) -> 
     logger.info("Wrote to DynamoDB: %s", json.dumps(item, default=str))
 
 
+def schedule_retry(context, trading_date: date, retry_count: int) -> None:
+    """Create a one-time EventBridge Scheduler schedule to re-invoke this Lambda."""
+    scheduler = boto3.client("scheduler")
+    run_at = datetime.now(timezone.utc) + timedelta(minutes=RETRY_DELAY_MINUTES)
+    schedule_name = f"ingestion-retry-{trading_date.isoformat()}"
+
+    scheduler.create_schedule(
+        Name=schedule_name,
+        GroupName="default",
+        FlexibleTimeWindow={"Mode": "OFF"},
+        ScheduleExpression=f"at({run_at.strftime('%Y-%m-%dT%H:%M:%S')})",
+        Target={
+            "Arn": context.invoked_function_arn,
+            "RoleArn": os.environ["SCHEDULER_ROLE_ARN"],
+            "Input": json.dumps({
+                "date": trading_date.isoformat(),
+                "retry": retry_count + 1,
+            }),
+        },
+        ActionAfterCompletion="DELETE",
+    )
+    logger.info(
+        "Scheduled retry %d/%d for %s at %s",
+        retry_count + 1, MAX_SCHEDULED_RETRIES,
+        trading_date.isoformat(), run_at.isoformat(),
+    )
+
+
 def handler(event, context):
     logger.info("Event: %s", json.dumps(event))
 
     table_name = os.environ["TABLE_NAME"]
+    retry_count = event.get("retry", 0)
+    manual_date = event.get("date")
 
-    if event.get("date"):
-        trading_date = date.fromisoformat(event["date"])
+    if manual_date and retry_count == 0:
+        trading_date = date.fromisoformat(manual_date)
+    elif manual_date:
+        trading_date = date.fromisoformat(manual_date)
     else:
         trading_date = get_trading_date()
 
-    logger.info("Trading date: %s", trading_date.isoformat())
+    logger.info("Trading date: %s (retry %d/%d)", trading_date.isoformat(), retry_count, MAX_SCHEDULED_RETRIES)
 
     api_key = get_api_key()
 
     try:
         results = fetch_grouped_daily(api_key, trading_date)
     except HTTPError as exc:
-        if exc.code == 403 and trading_date == date.today():
-            prev = trading_date - timedelta(days=1)
-            while prev.weekday() >= 5:
-                prev -= timedelta(days=1)
-            logger.info("Today's data not ready — falling back to %s", prev)
-            results = fetch_grouped_daily(api_key, prev)
-            trading_date = prev
-        else:
-            logger.error("Massive API failed: HTTP %d", exc.code)
+        if exc.code == 403:
+            if retry_count < MAX_SCHEDULED_RETRIES and "SCHEDULER_ROLE_ARN" in os.environ:
+                schedule_retry(context, trading_date, retry_count)
+                msg = f"Data not available for {trading_date} — retry {retry_count + 1}/{MAX_SCHEDULED_RETRIES} in {RETRY_DELAY_MINUTES} min"
+                logger.info(msg)
+                return {"statusCode": 200, "body": json.dumps({"message": msg})}
+
+            logger.error("Data unavailable for %s after %d retries — giving up", trading_date, retry_count)
             raise
+
+        logger.error("Massive API failed: HTTP %d", exc.code)
+        raise
 
     movers = calculate_movers(results)
     if not movers:
