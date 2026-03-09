@@ -92,6 +92,33 @@ jobs:
             --distribution-id ${{ steps.outputs.outputs.distribution_id }} \
             --paths "/*"
 
+      - name: Backfill recent trading days
+        run: |
+          python3 -c "
+          from datetime import date, timedelta
+          d = date.today() - timedelta(days=1)
+          days = []
+          while len(days) < 7:
+              if d.weekday() < 5:
+                  days.append(d.isoformat())
+              d -= timedelta(days=1)
+          print(' '.join(days))
+          " | while read -r DATES; do
+            for d in $DATES; do
+              echo "Ingesting $d..."
+              OUTPUT=$(aws lambda invoke \
+                --function-name ${{ steps.outputs.outputs.ingestion_fn }} \
+                --payload "{\"date\": \"$d\"}" \
+                --cli-binary-format raw-in-base64-out \
+                /tmp/ingest-$d.json \
+                --query 'FunctionError' --output text 2>&1)
+              cat /tmp/ingest-$d.json | head -c 200
+              echo ""
+              sleep 1
+            done
+          done
+          echo "Backfill complete"
+
       - name: Smoke test – API health
         run: |
           echo "Testing API endpoint..."
