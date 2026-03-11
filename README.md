@@ -222,8 +222,7 @@ aws ssm delete-parameter --name /stocks-pipeline/massive-api-key --region us-eas
 
 ## Trade-offs
 
-- **Free-tier Polygon API** — Data is one trading day behind. We compensate with `get_trading_date()` targeting yesterday and a retry mechanism for edge cases. A paid plan would give same-day data after market close.
-- **DynamoDB Scan** — The table holds at most ~260 rows/year (weekdays only). A Scan with limit and in-memory sort is simpler than maintaining a GSI for what is effectively a tiny dataset.
+- **Free-tier Missive API** — Data is one trading day behind. We compensate with `get_trading_date()` targeting yesterday and a retry mechanism for edge cases. A paid plan would give same-day data after market close.
 - **Grouped Daily endpoint** — One API call fetches all ~12,000 US stocks instead of 6 individual calls, staying well within the free tier limit of 5 requests/minute.
 - **EventBridge Scheduler retries vs Step Functions** — Scheduler is one API call to create a delayed re-invocation. Step Functions would give a visual workflow and built-in retry policies, but adds a state machine definition for what is simple "try again in 30 min" logic.
 - **Cache-Control: 1 hour** — Data changes once per day, so a 1-hour browser/CDN cache reduces Lambda invocations with minimal staleness. Could be increased to 6 hours safely.
